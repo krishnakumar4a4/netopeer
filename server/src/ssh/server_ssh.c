@@ -1,41 +1,3 @@
-/**
- * @file server_ssh.c
- * @author Michal Vasko <mvasko@cesnet.cz>
- * @brief Netopeer server SSH part
- *
- * Copyright (C) 2015 CESNET, z.s.p.o.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name of the Company nor the names of its contributors
- *    may be used to endorse or promote products derived from this
- *    software without specific prior written permission.
- *
- * ALTERNATIVELY, provided that this notice is retained in full, this
- * product may be distributed under the terms of the GNU General Public
- * License (GPL) version 2 or later, in which case the provisions
- * of the GPL apply INSTEAD OF those given above.
- *
- * This software is provided ``as is, and any express or implied
- * warranties, including, but not limited to, the implied warranties of
- * merchantability and fitness for a particular purpose are disclaimed.
- * In no event shall the company or contributors be liable for any
- * direct, indirect, incidental, special, exemplary, or consequential
- * damages (including, but not limited to, procurement of substitute
- * goods or services; loss of use, data, or profits; or business
- * interruption) however caused and on any theory of liability, whether
- * in contract, strict liability, or tort (including negligence or
- * otherwise) arising in any way out of the use of this software, even
- * if advised of the possibility of such damage.
- */
-
 #define _GNU_SOURCE
 #define _XOPEN_SOURCE
 
@@ -70,6 +32,7 @@ extern int quit, restart_soft;
 /* one global structure holding all the client information */
 extern struct np_state netopeer_state;
 extern struct np_options netopeer_options;
+
 
 static inline void _chan_free(struct client_struct_ssh* client, struct chan_struct* chan) {
 	if (chan->nc_sess != NULL) {
@@ -438,6 +401,206 @@ int np_ssh_kill_session(const char* sid, struct client_struct_ssh* cur_client) {
 
 	kill_chan->to_free = 1;
 	return 0;
+}
+
+struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* request) {
+	nc_rpc* rpc = NULL;
+	nc_reply* rpc_reply = NULL;
+	NC_MSG_TYPE rpc_type;
+	xmlNodePtr op;
+	int closing = 0, skip_sleep = 0;
+	struct nc_err* err;
+	struct chan_struct* chan;
+  rpc = nc_rpc_build(request,dsession);
+  /*
+	if (client->to_free) {
+		return 1;
+	}
+
+	for (chan = client->ssh_chans; chan != NULL; chan = chan->next) {
+		if (chan->to_free) {
+			++skip_sleep;
+			continue;
+		}
+*/
+		/* block this client until the hello is received */
+	/*	if (chan->nc_sess == NULL) {
+			if (!chan->netconf_subsystem) {
+				continue;
+			}
+			if (create_netconf_session(client, chan)) {
+				continue;
+			}
+		}*/
+
+		// receive a new RPC
+		rpc_type = nc_session_recv_rpc_k(dsession, 0, &rpc);
+/*		if (rpc_type == NC_MSG_WOULDBLOCK || rpc_type == NC_MSG_NONE) {
+			// no RPC, or processed internally
+		//	continue;
+		}
+
+//		gettimeofday((struct timeval*)&chan->last_rpc_time, NULL);
+
+		if (rpc_type == NC_MSG_UNKNOWN) {
+			if (nc_session_get_status(dsession) != NC_SESSION_STATUS_WORKING) {
+				// something really bad happened, and communication is not possible anymore 
+				nc_verb_error("%s: failed to receive client's message (nc session not working)", __func__);
+//				chan->to_free = 1;
+			}
+			// ignore 
+			//continue;
+		}
+
+		if (rpc_type != NC_MSG_RPC) {
+			// NC_MSG_HELLO, NC_MSG_REPLY, NC_MSG_NOTIFICATION
+			nc_verb_warning("%s: received a %s RPC from session %s, ignoring", __func__,
+							(rpc_type == NC_MSG_HELLO ? "hello" : (rpc_type == NC_MSG_REPLY ? "reply" : "notification")),
+							nc_session_get_id(dsession));
+			++skip_sleep;
+			//continue;
+		}
+
+		++skip_sleep;
+
+		// process the new RPC 
+		switch (nc_rpc_get_op(rpc)) {
+		case NC_OP_CLOSESESSION:
+			closing = 1;
+			rpc_reply = nc_reply_ok();
+			break;
+
+		case NC_OP_KILLSESSION:
+			if ((op = ncxml_rpc_get_op_content(rpc)) == NULL || op->name == NULL ||
+					xmlStrEqual(op->name, BAD_CAST "kill-session") == 0) {
+				nc_verb_error("%s: corrupted RPC message", __func__);
+				rpc_reply = nc_reply_error(nc_err_new(NC_ERR_OP_FAILED));
+				err = NULL;
+				xmlFreeNodeList(op);
+				break;
+			}
+			if (op->children == NULL || xmlStrEqual(op->children->name, BAD_CAST "session-id") == 0) {
+				nc_verb_error("%s: no session ID found");
+				err = nc_err_new(NC_ERR_MISSING_ELEM);
+				nc_err_set(err, NC_ERR_PARAM_INFO_BADELEM, "session-id");
+				rpc_reply = nc_reply_error(err);
+				err = NULL;
+				xmlFreeNodeList(op);
+				break;
+			}
+
+			// block-local variables 
+			char* sid;
+			int ret;
+
+			sid = (char*)xmlNodeGetContent(op->children);
+			xmlFreeNodeList(op);
+
+			// check if this client is not requested to be killed 
+			if (client_find_channel_by_sid(client, sid) != NULL) {
+				free(sid);
+				err = nc_err_new(NC_ERR_INVALID_VALUE);
+				nc_err_set(err, NC_ERR_PARAM_MSG, "Requested to kill this session.");
+				rpc_reply = nc_reply_error(err);
+				break;
+			}
+
+			ret = 1;
+#ifdef NP_TLS
+			ret = np_tls_kill_session(sid, (struct client_struct_tls*)client);
+#endif
+			if (ret != 0 && np_ssh_kill_session(sid, client) != 0) {
+				free(sid);
+				err = nc_err_new(NC_ERR_OP_FAILED);
+				nc_err_set(err, NC_ERR_PARAM_MSG, "No session with the requested ID found.");
+				rpc_reply = nc_reply_error(err);
+				break;
+			}
+
+			nc_verb_verbose("Session with the ID %s killed.", sid);
+			rpc_reply = nc_reply_ok();
+
+			free(sid);
+			break;
+
+		case NC_OP_CREATESUBSCRIPTION:
+			// create-subscription message 
+			if (nc_cpblts_enabled(dsession, "urn:ietf:params:netconf:capability:notification:1.0") == 0) {
+				rpc_reply = nc_reply_error(nc_err_new(NC_ERR_OP_NOT_SUPPORTED));
+				break;
+			}
+
+			// check if notifications are allowed on this session 
+			if (nc_session_notif_allowed(dsession) == 0) {
+				nc_verb_error("%s: notification subscription is not allowed on the session %s", __func__, nc_session_get_id(dsession));
+				err = nc_err_new(NC_ERR_OP_FAILED);
+				nc_err_set(err, NC_ERR_PARAM_TYPE, "protocol");
+				nc_err_set(err, NC_ERR_PARAM_MSG, "Another notification subscription is currently active on this session.");
+				rpc_reply = nc_reply_error(err);
+				err = NULL;
+				break;
+			}
+
+			rpc_reply = ncntf_subscription_check(rpc);
+			if (nc_reply_get_type(rpc_reply) != NC_REPLY_OK) {
+				break;
+			}
+
+			pthread_t thread;
+			struct ntf_thread_config* ntf_config;
+
+			if ((ntf_config = malloc(sizeof(struct ntf_thread_config))) == NULL) {
+				nc_verb_error("%s: memory allocation failed", __func__);
+				err = nc_err_new(NC_ERR_OP_FAILED);
+				nc_err_set(err, NC_ERR_PARAM_MSG, "Memory allocation failed.");
+				rpc_reply = nc_reply_error(err);
+				err = NULL;
+				break;
+			}
+			ntf_config->session = dsession;
+			ntf_config->subscribe_rpc = nc_rpc_dup(rpc);
+
+			// perform notification sending 
+			if ((pthread_create(&thread, NULL, client_notif_thread, ntf_config)) != 0) {
+				nc_reply_free(rpc_reply);
+				err = nc_err_new(NC_ERR_OP_FAILED);
+				nc_err_set(err, NC_ERR_PARAM_MSG, "Creating thread for sending Notifications failed.");
+				rpc_reply = nc_reply_error(err);
+				err = NULL;
+				break;
+			}
+			pthread_detach(thread);
+			break;
+
+		default:*/
+			if ((rpc_reply = ncds_apply_rpc2all(dsession, rpc, NULL)) == NULL) {
+				err = nc_err_new(NC_ERR_OP_FAILED);
+				nc_err_set(err, NC_ERR_PARAM_MSG, "For unknown reason no reply was returned by the library.");
+				rpc_reply = nc_reply_error(err);
+			} else if (rpc_reply == NCDS_RPC_NOT_APPLICABLE) {
+				err = nc_err_new(NC_ERR_OP_FAILED);
+				nc_err_set(err, NC_ERR_PARAM_MSG, "There is no device/data that could be affected.");
+				nc_reply_free(rpc_reply);
+				rpc_reply = nc_reply_error(err);
+			}
+
+
+		//	break;
+		//}
+
+		// send reply 
+//		nc_session_send_reply(chan->nc_sess, rpc, rpc_reply);
+//		nc_reply_free(rpc_reply);
+//		nc_rpc_free(rpc);
+
+	/*	if (closing) {
+			chan->to_free = 1;
+			closing = 0;
+		}
+    */
+	//}
+
+	return rpc_reply;
 }
 
 /* return: 0 - nothing happened (sleep), 1 - something happened (skip sleep) */
