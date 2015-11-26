@@ -403,7 +403,7 @@ int np_ssh_kill_session(const char* sid, struct client_struct_ssh* cur_client) {
 	return 0;
 }
 
-struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* request) {
+struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* request,struct nc_cpblts* cpblts_k) {
 	nc_rpc* rpc = NULL;
 	nc_reply* rpc_reply = NULL;
 	NC_MSG_TYPE rpc_type;
@@ -411,7 +411,11 @@ struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* r
 	int closing = 0, skip_sleep = 0;
 	struct nc_err* err;
 	struct chan_struct* chan;
+  char* a=NULL;
+  struct nc_session* session_new;
+
   rpc = nc_rpc_build(request,dsession);
+ // struct nc_session* session_new;
   /*
 	if (client->to_free) {
 		return 1;
@@ -431,11 +435,16 @@ struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* r
 			if (create_netconf_session(client, chan)) {
 				continue;
 			}
-		}*/
-
+	//	}
+*/
 		// receive a new RPC
-		rpc_type = nc_session_recv_rpc_k(dsession, 0, &rpc);
-/*		if (rpc_type == NC_MSG_WOULDBLOCK || rpc_type == NC_MSG_NONE) {
+    nc_session_get_cpblts_default();
+    session_new=nc_session_accept_libssh_channel(NULL, "krishna", NULL);
+ //   print_dbg_str(session_new.hostname);
+  session_new = nc_cap_get_k(dsession,session_new);  
+	rpc_type =	nc_session_recv_rpc_k(session_new, 0, &rpc);
+  print_dbg(rpc_type);
+  /*		if (rpc_type == NC_MSG_WOULDBLOCK || rpc_type == NC_MSG_NONE) {
 			// no RPC, or processed internally
 		//	continue;
 		}
@@ -573,7 +582,11 @@ struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* r
 			break;
 
 		default:*/
-			if ((rpc_reply = ncds_apply_rpc2all(dsession, rpc, NULL)) == NULL) {
+
+           print_dbg_ptr(dsession);
+           print_dbg_hex(dsession);
+            print_dbg(99);
+			if ((rpc_reply = ncds_apply_rpc2all(session_new, rpc, NULL)) == NULL) {
 				err = nc_err_new(NC_ERR_OP_FAILED);
 				nc_err_set(err, NC_ERR_PARAM_MSG, "For unknown reason no reply was returned by the library.");
 				rpc_reply = nc_reply_error(err);
@@ -583,7 +596,7 @@ struct nc_reply* np_ssh_client_netconf_rpc_k(struct nc_session* dsession,char* r
 				nc_reply_free(rpc_reply);
 				rpc_reply = nc_reply_error(err);
 			}
-
+print_dbg(99); 
 
 		//	break;
 		//}
